@@ -4,6 +4,14 @@
 #include "../../examples/autotest-validate/autotest-validate.h"
 #include "../../assignment-autotest/test/assignment1/username-from-conf-file.h"
 
+// Just here to play with Unity a bit.
+#define TEST_STRING
+#undef TEST_STRING
+
+#ifdef TEST_STRING
+#include <string.h>
+#endif
+
 /**
 * This function should:
 *   1) Call the my_username() function in autotest-validate.c to get your hard coded username.
@@ -18,5 +26,18 @@ void test_validate_my_username()
      * TODO: Replace the line below with your code here as described above to verify your /conf/username.txt 
      * config file and my_username() functions are setup properly
      */
-    TEST_ASSERT_TRUE_MESSAGE(false,"AESD students, please fix me!");
+    //TEST_ASSERT_TRUE_MESSAGE(false,"AESD students, please fix me!");
+
+   const char * name_conf = my_username();
+   char * name_test = malloc_username_from_conf_file();
+
+#ifdef TEST_STRING
+   int len = strlen(name_conf);
+   int res = strncmp(name_conf, name_test, len);
+   TEST_ASSERT_TRUE_MESSAGE(res == 0, "Configured correctly");
+#else
+   TEST_ASSERT_EQUAL_STRING(name_conf, name_test);
+#endif
+
+   free(name_test);
 }
