@@ -1,5 +1,24 @@
 #include "systemcalls.h"
 
+#include <stdio.h>
+#include <stdlib.h>	/* system()	*/
+#include <sys/types.h>	/* pid_t	*/
+#include <unistd.h>	/* fork, execv, exit, 	*/
+#include <sys/wait.h>	/* waitpid	*/
+#include <fcntl.h>	/* open, close	*/
+
+#define PROG_NAME "assignment3"
+#define DEBUG
+
+// Debug function to print values.
+#ifdef DEBUG
+#define dbg(fmt, ...) \
+	printf("%s: %s: " fmt " \n", PROG_NAME, __func__, ##__VA_ARGS__)
+#else
+#define dbg(fmt, ...)
+#endif
+
+
 /**
  * @param cmd the command to execute with system()
  * @return true if the command in @param cmd was executed
@@ -16,8 +35,27 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
+	bool ret = false;
+	int status = 0;
 
-    return true;
+	if (cmd == NULL) {
+		goto out;
+	}
+
+	if (system(cmd) != 0) {
+		perror("System failed");
+		goto out;
+	}
+
+	if (! WIFEXITED(status)) {
+		perror("WIFEXITED failed");
+		goto out;
+	}
+
+	ret = WEXITSTATUS(status) == 0;
+
+out:
+	return ret;
 }
 
 /**
@@ -42,7 +80,8 @@ bool do_exec(int count, ...)
     int i;
     for(i=0; i<count; i++)
     {
-        command[i] = va_arg(args, char *);
+	command[i] = va_arg(args, char *);
+	dbg("cmd %d: %s", i, command[i]);
     }
     command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
@@ -59,9 +98,34 @@ bool do_exec(int count, ...)
  *
 */
 
-    va_end(args);
+	pid_t pid = fork();
+	int status = 0;
+	bool ret = false;
+	if (pid < 0) {
+		// Fork failed
+		perror("Failure executing syscall fork");
+		goto out;
+	} else if (pid == 0) {
+		// child if pid = 0
+		execv(command[0], command);
+		perror("Failure executing syscall execv");
+		exit(-1);
+	}
+	// parent if pid > 0
+	if (waitpid(pid, &status, 0) == -1) {
+		perror("Waitpid failed");
+		goto out;
+	}
+	if (! WIFEXITED(status)) {
+		perror("WIFEXITED failed");
+		goto out;
+	}
 
-    return true;
+	ret = WEXITSTATUS(status) == 0;
+
+out:
+	va_end(args);
+	return ret;
 }
 
 /**
@@ -77,7 +141,8 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     int i;
     for(i=0; i<count; i++)
     {
-        command[i] = va_arg(args, char *);
+	command[i] = va_arg(args, char *);
+	dbg("cmd %d: %s", i, command[i]);
     }
     command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
@@ -93,7 +158,44 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *
 */
 
-    va_end(args);
+	int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+	int status = 0;
+	bool ret = false;
+	if (fd < 0) {
+		perror("Failed to open output file");
+		goto out;
+	}
 
-    return true;
+	pid_t pid = fork();
+	if (pid < 0) {
+		// Fork failed
+		perror("Failure executing syscall fork");
+		goto out_close;
+	} else if (pid == 0) {
+		// child if pid = 0
+		if (dup2(fd, 1) < 0) {
+			perror("Failed to redirect output");
+		} else {
+			execv(command[0], command);
+			perror("Failure executing syscall execv");
+		}
+		exit(-1);
+	}
+	// parent if pid > 0
+	if (waitpid(pid, &status, 0) == -1) {
+		perror("Waitpid failed");
+		goto out_close;
+	}
+	if (! WIFEXITED(status)) {
+		perror("WIFEXITED failed");
+		goto out_close;
+	}
+
+	ret = WEXITSTATUS(status) == 0;
+
+out_close:
+	close(fd);
+out:
+	va_end(args);
+	return ret;
 }
