@@ -1,4 +1,4 @@
-#! /bin/bash
+#! /bin/sh
 
 # To test use following commands:
 # $ mkdir -p a/b/c
@@ -6,7 +6,7 @@
 # $ echo -e "derp\nblaat" > a/b/c/c.txt
 # $ ./finder.sh a derp ; ./finder.sh a blaat
 
-set -eu -o pipefail
+set -eu #-o pipefail
 
 readonly SCRIPTNAME=$(basename $0)
 readonly HELP="${SCRIPTNAME} <FILESDIR> <SEARCH_STR>"
@@ -21,7 +21,7 @@ readonly HELP="${SCRIPTNAME} <FILESDIR> <SEARCH_STR>"
 readonly FILESDIR="${1?No file directory given: ${HELP}}"
 readonly SEARCHSTR="${2?No search string given: ${HELP}}"
 
-function die {
+die() {
 	local _msg="${1:-Unregistered error. Exiting..}"
 	echo "${SCRIPTNAME}: ${_msg}"
 	exit 1
@@ -29,15 +29,21 @@ function die {
 
 # 3) Exits with return value 1 error and print statements if filesdir does not
 # represent a directory on the filesystem
-[[ -d "${FILESDIR}" ]] || die "${FILESDIR} not a directory."
+[ -d "${FILESDIR}" ] || die "${FILESDIR} not a directory."
 
 # $) Prints a message "The number of files are X and the number of matching
 # lines are Y" where X is the number of files in the directory and all
 # subdirectories and Y is the number of matching lines found in respective
 # files, where a matching line refers to a line which contains searchstr (and
 # may also contain # additional content).
-readonly files_total="$(find ${FILESDIR} -type f | wc -l)"
-readonly results_total="$(grep -R "${SEARCHSTR}" "${FILESDIR}" | wc -l)"
+
+# Used to use `wc -l`, but due to assignment can't use that no more.. Ugly hack around it.
+cnt () {
+	echo $#
+}
+
+readonly files_total="$(cnt $(find ${FILESDIR} -type f))"
+readonly results_total="$(cnt $(grep -R "${SEARCHSTR}" "${FILESDIR}"))"
 
 # Long text does not fit in 80 characters -_-'
 echo "The number of files are ${files_total} and the number of matching lines are ${results_total}"
