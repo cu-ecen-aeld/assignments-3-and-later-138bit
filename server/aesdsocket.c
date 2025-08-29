@@ -287,7 +287,10 @@ int main(int argc, char *argv[]) {
 			fprintf(stderr, "Option %s not supported\n", argv[1]);
 			exit(1);
 		}
-		daemon(0, 0);
+		if (daemon(0, 0)) {
+			perror("daemon failed");
+			exit(1);
+		}
 	}
 
 	openlog(PROG_NAME, LOG_PERROR|LOG_PID, LOG_USER);
