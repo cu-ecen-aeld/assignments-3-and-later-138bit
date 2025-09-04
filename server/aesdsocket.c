@@ -9,15 +9,22 @@
 #include <signal.h>	/* sigaction */
 #include <pthread.h>
 #include <time.h>
+#include <fcntl.h>	/* open */
 
 #define PROG_NAME	"aesdsocket"
 
 // Global data
-FILE *log_fp;
-pthread_mutex_t mutex;
+static int log_fp = 0;
+static pthread_mutex_t mutex;
+
+#ifndef USE_AESD_CHAR_DEVICE
+#define WRITE_FILE "/var/tmp/aesdsocketdata"
+#else
+#define WRITE_FILE "/dev/aesdchar"
+#endif
 
 void global_clean() {
-	if (log_fp > 0) fclose(log_fp);
+	if (log_fp > 0) close(log_fp);
 
 	/* I don't have to check this, because if pthread_mutex_init
 	 * fails the program exists */
@@ -25,7 +32,7 @@ void global_clean() {
 }
 
 void global_setup() {
-	log_fp = fopen("/var/tmp/aesdsocketdata", "w+");
+	log_fp = open(WRITE_FILE, O_RDWR|O_APPEND|O_CREAT, S_IRUSR|S_IWUSR);
 	if (!log_fp) {
 		perror("fopen failed");
 		exit(1);
@@ -108,7 +115,6 @@ typedef struct {
 	int sock;
 	struct sockaddr_in addr;
 	char ipaddr[INET_ADDRSTRLEN];
-	FILE *fp;
 	socklen_t addrlen;
 } client_t;
 
@@ -124,11 +130,13 @@ void client_logic(client_t *c) {
 	size_t readfilelen = 0;
 	ssize_t sendsocklen = 0;
 
+//#ifndef USE_AESD_CHAR_DEVICE
 	// Always make sure we're writing to the end of the file
-	if (fseek(log_fp, 0, SEEK_END)) {
-		perror("fseek END failed");
+	if (lseek(log_fp, 0, SEEK_END) < 0) {
+		perror("lseek END failed");
 		goto err;
 	}
+//#endif
 
 	// Get's IP address 
 	if ( ! inet_ntop(AF_INET, &c->addr.sin_addr, c->ipaddr, INET_ADDRSTRLEN)) {
@@ -148,20 +156,21 @@ void client_logic(client_t *c) {
 	while ((readsocklen = recv(c->sock, buf, BUFLEN, MSG_DONTWAIT)) > 1) {
 		buf[readsocklen] = '\0';
 		syslog(LOG_INFO, "%s", buf);
-		if (fputs(buf, log_fp) < 0) {
+		if (write(log_fp, buf, readsocklen) < 0) {
 			perror("fputs failed");
 			goto err;
 		}
 	}
 
-	if (fseek(log_fp, 0, SEEK_SET)) {
+//#ifndef USE_AESD_CHAR_DEVICE
+	if (lseek(log_fp, 0, SEEK_SET)) {
 		perror("fseek SET failed");
 		goto err;
 	}
-	fflush(log_fp);
+//#endif
 
 	// Read from the file and write to the socket
-	while ((readfilelen = fread(buf, sizeof(char), BUFLEN, log_fp))) {
+	while ((readfilelen = read(log_fp, buf, BUFLEN))) {
 		sendsocklen = send(c->sock, buf, readfilelen, 0);
 
 		if (readfilelen != sendsocklen) {
@@ -191,6 +200,7 @@ static void sig_handler(int signal) {
 		break;
 	default:
 		// do nothing.
+		break;
 	}
 }
 
@@ -240,6 +250,7 @@ void thread_clean() {
 	}
 }
 
+#ifndef USE_AESD_CHAR_DEVICE
 static void * timer_log(void *arg) {
 	time_t wall_time;
 	char * timestamp;
@@ -254,9 +265,8 @@ static void * timer_log(void *arg) {
 			// do something?
 		}
 
-		fflush(log_fp);
-		if (fseek(log_fp, 0, SEEK_END)) {
-			perror("fseek END failed");
+		if (lseek(log_fp, 0, SEEK_END) < 0) {
+			perror("lseek END failed");
 		}
 
 		// write timestamp to file
@@ -265,8 +275,7 @@ static void * timer_log(void *arg) {
 
 		memset(msg, 0, 512);
 		sprintf(msg, "timestamp:%s", timestamp);
-		fwrite(msg, sizeof(char), strlen(msg), log_fp);
-		fflush(log_fp);
+		write(log_fp, msg, strlen(msg));
 
 		if (pthread_mutex_unlock(&mutex)) {
 			perror("pthread_mutex_unlock error");
@@ -275,12 +284,17 @@ static void * timer_log(void *arg) {
 	}
 	pthread_exit(NULL);
 }
+#endif
 
 int main(int argc, char *argv[]) {
 	server_t serv;
 	struct sigaction actn;
 	int ret = 0;
+	int first = 1;
+
+#ifndef USE_AESD_CHAR_DEVICE
 	pthread_t log_tid;
+#endif
 
 	if (argc > 1) {
 		if (strncmp(argv[1], "-d", 2)) {
@@ -294,13 +308,14 @@ int main(int argc, char *argv[]) {
 	}
 
 	openlog(PROG_NAME, LOG_PERROR|LOG_PID, LOG_USER);
-	global_setup();
 	server_setup(&serv);
 
+#ifndef USE_AESD_CHAR_DEVICE
 	if (pthread_create(&log_tid, NULL, timer_log, NULL)) {
 		perror("pthread_create LOG failed");
 		goto out;
 	}
+#endif
 
 	signal_setup(&actn);
 	head = NULL;
@@ -313,6 +328,10 @@ int main(int argc, char *argv[]) {
 		memset(next, 0, sizeof(task_t));
 		client_setup(&next->clnt);
 		next->clnt.sock = accept(serv.sock, (struct sockaddr *)&next->clnt.addr, &next->clnt.addrlen);
+		if (first) {
+			global_setup();
+			first = 0;
+		}
 
 		if (next->clnt.sock < 0) {
 			ret = errno != EINTR;
@@ -327,7 +346,9 @@ int main(int argc, char *argv[]) {
 		}
 	}
 out:
+#ifndef USE_AESD_CHAR_DEVICE
 	pthread_join(log_tid, NULL);
+#endif
 
 	global_clean();
 	server_close(&serv);

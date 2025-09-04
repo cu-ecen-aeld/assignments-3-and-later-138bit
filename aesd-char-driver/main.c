@@ -17,118 +17,281 @@
 #include <linux/types.h>
 #include <linux/cdev.h>
 #include <linux/fs.h> // file_operations
+#include <linux/slab.h>	// kmalloc
 #include "aesdchar.h"
+#include "aesd-circular-buffer.h"
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
-MODULE_AUTHOR("Your Name Here"); /** TODO: fill in your name **/
+MODULE_AUTHOR("138bit"); /** TODO: fill in your name **/
 MODULE_LICENSE("Dual BSD/GPL");
+
+#define PROG_NAME "aesd-char-driver"
+
+//#define DEBUG
+#ifdef DEBUG
+#define dbg(fmt, ...) \
+	printk(KERN_ERR "%s: %s: " fmt " \n", PROG_NAME, __func__, ##__VA_ARGS__)
+#else
+#define dbg(fmt, ...)
+#endif
+
 
 struct aesd_dev aesd_device;
 
-int aesd_open(struct inode *inode, struct file *filp)
-{
-    PDEBUG("open");
-    /**
-     * TODO: handle open
-     */
-    return 0;
+int aesd_open(struct inode *inode, struct file *filp) {
+	PDEBUG("open");
+	/**
+	 * TODO: handle open
+	 */
+
+	// flip->private_data = container_of(inode->i_cdev, struct aesd_dev, cdev);
+	return 0;
 }
 
-int aesd_release(struct inode *inode, struct file *filp)
-{
-    PDEBUG("release");
-    /**
-     * TODO: handle release
-     */
-    return 0;
+int aesd_release(struct inode *inode, struct file *filp) {
+	PDEBUG("release");
+	/**
+	 * TODO: handle release
+	 */
+	return 0;
 }
 
 ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
-                loff_t *f_pos)
-{
-    ssize_t retval = 0;
-    PDEBUG("read %zu bytes with offset %lld",count,*f_pos);
-    /**
-     * TODO: handle read
-     */
-    return retval;
+				loff_t *f_pos) {
+	ssize_t retval = 0;
+	size_t size = 0;
+	/**
+	 * TODO: handle read
+	 */
+	size_t e_pos = 0;
+	struct aesd_buffer_entry * entry;
+	dbg("read %zu bytes with offset %lld",count,*f_pos);
+
+	// mutex_lock_interruptible?
+	if (mutex_lock_interruptible(&aesd_device.lock)) {
+		retval = -ERESTART;
+		goto out;
+	}
+	entry = aesd_circular_buffer_find_entry_offset_for_fpos(&aesd_device.buffer, *f_pos, &e_pos);
+	if (entry == NULL) {
+		//retval = -EIO;
+		retval = 0;
+		goto out;
+	}
+
+#if 0
+	{ // print out buffer.
+		uint8_t index;
+		struct aesd_buffer_entry *entry;
+		AESD_CIRCULAR_BUFFER_FOREACH(entry, &aesd_device.buffer, index) {
+			if (entry->buffptr) {
+				dbg("%d = %s", index, entry->buffptr);
+			}
+		}
+	}
+#endif
+
+	size = entry->size - e_pos;
+	size = (count > size) ? size : count;
+
+	//size = (e_pos > count) ? count : e_pos;
+
+	dbg("got '%s' with size %zu (cnt: %zu, e_pos: %zu)\n", entry->buffptr, size, count, e_pos);
+	if (copy_to_user(buf, entry->buffptr + e_pos, size)) {
+		retval = -EFAULT;
+		goto out;
+	}
+	*f_pos += size;
+	retval = size;
+out:
+	mutex_unlock(&aesd_device.lock);
+	return retval;
 }
 
 ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
-                loff_t *f_pos)
-{
-    ssize_t retval = -ENOMEM;
-    PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
-    /**
-     * TODO: handle write
-     */
-    return retval;
+				loff_t *f_pos) {
+	ssize_t retval = -ENOMEM;
+	size_t len = 0;
+	dbg("write %zu bytes with offset %lld",count,*f_pos);
+	/**
+	 * TODO: handle write
+	 */
+
+	// If nothing is written, return directly
+	if (count == 0) return 0;
+
+	if (mutex_lock_interruptible(&aesd_device.lock)) {
+		retval = -ERESTART;
+		goto out;
+	}
+
+	// Either create or increase buffer.
+	if (aesd_device.work.buffptr == NULL) {
+		aesd_device.work.buffptr = kmalloc(sizeof(char) * count + 1, GFP_KERNEL);
+		if (! aesd_device.work.buffptr) {
+			goto out;
+		}
+		memset(aesd_device.work.buffptr, '\0', count + 1);
+		len = 0;
+		aesd_device.work.size = count + 1;
+	} else {
+		char *old = aesd_device.work.buffptr;
+		size_t total = count + aesd_device.work.size;
+
+		aesd_device.work.buffptr = kmalloc(sizeof(char) * total, GFP_KERNEL);
+		if (! aesd_device.work.buffptr) {
+			kfree(old);
+			goto out;
+		}
+		memset(aesd_device.work.buffptr, '\0', total);
+
+		strncpy(aesd_device.work.buffptr, old, aesd_device.work.size);
+
+		// because we're messing around with a '\0' on the end of the string.
+		// strlen would give this number!
+		len = aesd_device.work.size - 1;
+		aesd_device.work.size = total;
+		kfree(old);
+	}
+
+	if (copy_from_user(aesd_device.work.buffptr + len, buf, count)) {
+		printk(KERN_ERR "Could not copy from user\n");
+
+		// kfree or not to kfree?
+		retval = -EFAULT;
+		goto out;
+	}
+	dbg("Got string '%s' (len:%zu, count:%zu, size:%zu)\n", buf, len, count, aesd_device.work.size);
+
+	// Remove two because we add 1, and indexes start at 0.
+	if (aesd_device.work.buffptr[aesd_device.work.size - 2] == '\n') {
+		dbg("putting string '%s' into circular buffer\n", aesd_device.work.buffptr);
+		// remove null terminator:
+		aesd_device.work.size -= 1;
+		// This function re-uses the pointer, ..
+		aesd_circular_buffer_add_entry(&aesd_device.buffer, 
+			(const struct aesd_buffer_entry *)&aesd_device.work);
+		// .. therefore I don't have to free it.
+		aesd_device.work.buffptr = NULL;
+		aesd_device.work.size = 0;
+	} else {
+		dbg("string '%s' not ready yet..\n", aesd_device.work.buffptr);
+	}
+
+	retval = count;
+out:
+	mutex_unlock(&aesd_device.lock);
+	return retval;
 }
+
+loff_t aesd_lseek(struct file *file, loff_t offset, int whence) {
+	uint8_t index;
+	struct aesd_circular_buffer buffer;
+	struct aesd_buffer_entry *entry;
+	loff_t ret = 0;
+
+	if (mutex_lock_interruptible(&aesd_device.lock)) {
+		ret = -ERESTART;
+		goto out;
+	}
+
+	// I presume I can do this because unused have size 0, and once the buffer is full
+	// an "old" entry gets overwritten.
+	AESD_CIRCULAR_BUFFER_FOREACH(entry, &aesd_device.buffer, index) {
+		ret += entry->size;
+	}
+
+	if ((ret = fixed_size_llseek(file, offset, whence, ret)) < 0) {
+		goto out;
+	}
+
+out:
+	mutex_unlock(&aesd_device.lock);
+	return ret;
+}
+
 struct file_operations aesd_fops = {
-    .owner =    THIS_MODULE,
-    .read =     aesd_read,
-    .write =    aesd_write,
-    .open =     aesd_open,
-    .release =  aesd_release,
+	.owner = THIS_MODULE,
+	.read = aesd_read,
+	.write = aesd_write,
+	.open = aesd_open,
+	.release = aesd_release,
+	.llseek = aesd_lseek,
 };
 
-static int aesd_setup_cdev(struct aesd_dev *dev)
-{
-    int err, devno = MKDEV(aesd_major, aesd_minor);
+static int aesd_setup_cdev(struct aesd_dev *dev) {
+	int err, devno = MKDEV(aesd_major, aesd_minor);
 
-    cdev_init(&dev->cdev, &aesd_fops);
-    dev->cdev.owner = THIS_MODULE;
-    dev->cdev.ops = &aesd_fops;
-    err = cdev_add (&dev->cdev, devno, 1);
-    if (err) {
-        printk(KERN_ERR "Error %d adding aesd cdev", err);
-    }
-    return err;
+	cdev_init(&dev->cdev, &aesd_fops);
+	dev->cdev.owner = THIS_MODULE;
+	dev->cdev.ops = &aesd_fops;
+	err = cdev_add (&dev->cdev, devno, 1);
+	if (err) {
+		printk(KERN_ERR "Error %d adding aesd cdev", err);
+	}
+	return err;
 }
 
+int aesd_init_module(void) {
+	dev_t dev = 0;
+	int result;
+	result = alloc_chrdev_region(&dev, aesd_minor, 1, "aesdchar");
+	aesd_major = MAJOR(dev);
+	if (result < 0) {
+		printk(KERN_WARNING "Can't get major %d\n", aesd_major);
+		return result;
+	}
+	memset(&aesd_device,0,sizeof(struct aesd_dev));
+	//aesd_device.work.buffptr = NULL;
 
+	/**
+	 * TODO: initialize the AESD specific portion of the device
+	 */
+	mutex_init(&aesd_device.lock);
+	aesd_circular_buffer_init(&aesd_device.buffer);
 
-int aesd_init_module(void)
-{
-    dev_t dev = 0;
-    int result;
-    result = alloc_chrdev_region(&dev, aesd_minor, 1,
-            "aesdchar");
-    aesd_major = MAJOR(dev);
-    if (result < 0) {
-        printk(KERN_WARNING "Can't get major %d\n", aesd_major);
-        return result;
-    }
-    memset(&aesd_device,0,sizeof(struct aesd_dev));
+	result = aesd_setup_cdev(&aesd_device);
 
-    /**
-     * TODO: initialize the AESD specific portion of the device
-     */
-
-    result = aesd_setup_cdev(&aesd_device);
-
-    if( result ) {
-        unregister_chrdev_region(dev, 1);
-    }
-    return result;
+	if( result ) {
+		unregister_chrdev_region(dev, 1);
+		mutex_destroy(&aesd_device.lock);
+	}
+	return result;
 
 }
 
-void aesd_cleanup_module(void)
-{
-    dev_t devno = MKDEV(aesd_major, aesd_minor);
+void aesd_cleanup_module(void) {
+	uint8_t index;
+	struct aesd_circular_buffer buffer;
+	struct aesd_buffer_entry *entry;
 
-    cdev_del(&aesd_device.cdev);
+	dev_t devno = MKDEV(aesd_major, aesd_minor);
 
-    /**
-     * TODO: cleanup AESD specific poritions here as necessary
-     */
+	cdev_del(&aesd_device.cdev);
+	/**
+	 * TODO: cleanup AESD specific poritions here as necessary
+	 */
+	mutex_lock(&aesd_device.lock);
 
-    unregister_chrdev_region(devno, 1);
+	AESD_CIRCULAR_BUFFER_FOREACH(entry, &aesd_device.buffer, index) {
+		if (entry->buffptr) {
+			kfree(entry->buffptr);
+			entry->buffptr = NULL;
+		}
+	}
+
+	if (aesd_device.work.buffptr) {
+		kfree(aesd_device.work.buffptr);
+		aesd_device.work.buffptr = NULL;
+	}
+
+	mutex_unlock(&aesd_device.lock);
+
+	mutex_destroy(&aesd_device.lock);
+
+	unregister_chrdev_region(devno, 1);
 }
-
-
 
 module_init(aesd_init_module);
 module_exit(aesd_cleanup_module);
