@@ -16,6 +16,9 @@
 FILE *log_fp;
 pthread_mutex_t mutex;
 
+//#define WRITE_FILE "/var/tmp/aesdsocketdata"
+#define WRITE_FILE "/dev/aesdchar"
+
 void global_clean() {
 	if (log_fp > 0) fclose(log_fp);
 
@@ -25,7 +28,7 @@ void global_clean() {
 }
 
 void global_setup() {
-	log_fp = fopen("/var/tmp/aesdsocketdata", "w+");
+	log_fp = fopen(WRITE_FILE, "w+");
 	if (!log_fp) {
 		perror("fopen failed");
 		exit(1);
@@ -240,6 +243,7 @@ void thread_clean() {
 	}
 }
 
+#ifdef TIMESTAMPED
 static void * timer_log(void *arg) {
 	time_t wall_time;
 	char * timestamp;
@@ -275,12 +279,16 @@ static void * timer_log(void *arg) {
 	}
 	pthread_exit(NULL);
 }
+#endif
 
 int main(int argc, char *argv[]) {
 	server_t serv;
 	struct sigaction actn;
 	int ret = 0;
+
+#ifdef TIMESTAMPED
 	pthread_t log_tid;
+#endif
 
 	if (argc > 1) {
 		if (strncmp(argv[1], "-d", 2)) {
@@ -297,10 +305,12 @@ int main(int argc, char *argv[]) {
 	global_setup();
 	server_setup(&serv);
 
+#ifdef TIMESTAMPED
 	if (pthread_create(&log_tid, NULL, timer_log, NULL)) {
 		perror("pthread_create LOG failed");
 		goto out;
 	}
+#endif
 
 	signal_setup(&actn);
 	head = NULL;
@@ -327,7 +337,9 @@ int main(int argc, char *argv[]) {
 		}
 	}
 out:
+#ifdef TIMESTAMPED
 	pthread_join(log_tid, NULL);
+#endif
 
 	global_clean();
 	server_close(&serv);
