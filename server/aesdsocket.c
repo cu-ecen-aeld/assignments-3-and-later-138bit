@@ -16,8 +16,11 @@
 FILE *log_fp;
 pthread_mutex_t mutex;
 
-//#define WRITE_FILE "/var/tmp/aesdsocketdata"
+#ifndef USE_AESD_CHAR_DEVICE
+#define WRITE_FILE "/var/tmp/aesdsocketdata"
+#else
 #define WRITE_FILE "/dev/aesdchar"
+#endif
 
 void global_clean() {
 	if (log_fp > 0) fclose(log_fp);
@@ -127,11 +130,13 @@ void client_logic(client_t *c) {
 	size_t readfilelen = 0;
 	ssize_t sendsocklen = 0;
 
+#ifndef USE_AESD_CHAR_DEVICE
 	// Always make sure we're writing to the end of the file
 	if (fseek(log_fp, 0, SEEK_END)) {
 		perror("fseek END failed");
 		goto err;
 	}
+#endif
 
 	// Get's IP address 
 	if ( ! inet_ntop(AF_INET, &c->addr.sin_addr, c->ipaddr, INET_ADDRSTRLEN)) {
@@ -157,11 +162,13 @@ void client_logic(client_t *c) {
 		}
 	}
 
+#ifndef USE_AESD_CHAR_DEVICE
 	if (fseek(log_fp, 0, SEEK_SET)) {
 		perror("fseek SET failed");
 		goto err;
 	}
 	fflush(log_fp);
+#endif
 
 	// Read from the file and write to the socket
 	while ((readfilelen = fread(buf, sizeof(char), BUFLEN, log_fp))) {
@@ -243,7 +250,7 @@ void thread_clean() {
 	}
 }
 
-#ifdef TIMESTAMPED
+#ifndef USE_AESD_CHAR_DEVICE
 static void * timer_log(void *arg) {
 	time_t wall_time;
 	char * timestamp;
@@ -285,8 +292,9 @@ int main(int argc, char *argv[]) {
 	server_t serv;
 	struct sigaction actn;
 	int ret = 0;
+	int first = 1;
 
-#ifdef TIMESTAMPED
+#ifndef USE_AESD_CHAR_DEVICE
 	pthread_t log_tid;
 #endif
 
@@ -302,10 +310,9 @@ int main(int argc, char *argv[]) {
 	}
 
 	openlog(PROG_NAME, LOG_PERROR|LOG_PID, LOG_USER);
-	global_setup();
 	server_setup(&serv);
 
-#ifdef TIMESTAMPED
+#ifndef USE_AESD_CHAR_DEVICE
 	if (pthread_create(&log_tid, NULL, timer_log, NULL)) {
 		perror("pthread_create LOG failed");
 		goto out;
@@ -323,6 +330,10 @@ int main(int argc, char *argv[]) {
 		memset(next, 0, sizeof(task_t));
 		client_setup(&next->clnt);
 		next->clnt.sock = accept(serv.sock, (struct sockaddr *)&next->clnt.addr, &next->clnt.addrlen);
+		if (first) {
+			global_setup();
+			first = 0;
+		}
 
 		if (next->clnt.sock < 0) {
 			ret = errno != EINTR;
@@ -337,7 +348,7 @@ int main(int argc, char *argv[]) {
 		}
 	}
 out:
-#ifdef TIMESTAMPED
+#ifndef USE_AESD_CHAR_DEVICE
 	pthread_join(log_tid, NULL);
 #endif
 
