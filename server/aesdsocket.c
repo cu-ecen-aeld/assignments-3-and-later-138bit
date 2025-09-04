@@ -132,8 +132,8 @@ void client_logic(client_t *c) {
 
 //#ifndef USE_AESD_CHAR_DEVICE
 	// Always make sure we're writing to the end of the file
-	if (lseek(log_fp, 0, SEEK_END)) {
-		perror("fseek END failed");
+	if (lseek(log_fp, 0, SEEK_END) < 0) {
+		perror("lseek END failed");
 		goto err;
 	}
 //#endif
@@ -265,8 +265,8 @@ static void * timer_log(void *arg) {
 			// do something?
 		}
 
-		if (lseek(log_fp, 0, SEEK_END)) {
-			perror("fseek END failed");
+		if (lseek(log_fp, 0, SEEK_END) < 0) {
+			perror("lseek END failed");
 		}
 
 		// write timestamp to file
