@@ -9,12 +9,13 @@
 #include <signal.h>	/* sigaction */
 #include <pthread.h>
 #include <time.h>
+#include <fcntl.h>	/* open */
 
 #define PROG_NAME	"aesdsocket"
 
 // Global data
-FILE *log_fp;
-pthread_mutex_t mutex;
+static int log_fp = 0;
+static pthread_mutex_t mutex;
 
 #ifndef USE_AESD_CHAR_DEVICE
 #define WRITE_FILE "/var/tmp/aesdsocketdata"
@@ -23,7 +24,7 @@ pthread_mutex_t mutex;
 #endif
 
 void global_clean() {
-	if (log_fp > 0) fclose(log_fp);
+	if (log_fp > 0) close(log_fp);
 
 	/* I don't have to check this, because if pthread_mutex_init
 	 * fails the program exists */
@@ -31,7 +32,7 @@ void global_clean() {
 }
 
 void global_setup() {
-	log_fp = fopen(WRITE_FILE, "w+");
+	log_fp = open(WRITE_FILE, O_RDWR|O_APPEND|O_CREAT, S_IRUSR|S_IWUSR);
 	if (!log_fp) {
 		perror("fopen failed");
 		exit(1);
@@ -114,7 +115,6 @@ typedef struct {
 	int sock;
 	struct sockaddr_in addr;
 	char ipaddr[INET_ADDRSTRLEN];
-	FILE *fp;
 	socklen_t addrlen;
 } client_t;
 
@@ -130,13 +130,13 @@ void client_logic(client_t *c) {
 	size_t readfilelen = 0;
 	ssize_t sendsocklen = 0;
 
-#ifndef USE_AESD_CHAR_DEVICE
+//#ifndef USE_AESD_CHAR_DEVICE
 	// Always make sure we're writing to the end of the file
-	if (fseek(log_fp, 0, SEEK_END)) {
+	if (lseek(log_fp, 0, SEEK_END)) {
 		perror("fseek END failed");
 		goto err;
 	}
-#endif
+//#endif
 
 	// Get's IP address 
 	if ( ! inet_ntop(AF_INET, &c->addr.sin_addr, c->ipaddr, INET_ADDRSTRLEN)) {
@@ -156,22 +156,21 @@ void client_logic(client_t *c) {
 	while ((readsocklen = recv(c->sock, buf, BUFLEN, MSG_DONTWAIT)) > 1) {
 		buf[readsocklen] = '\0';
 		syslog(LOG_INFO, "%s", buf);
-		if (fputs(buf, log_fp) < 0) {
+		if (write(log_fp, buf, readsocklen) < 0) {
 			perror("fputs failed");
 			goto err;
 		}
 	}
 
-#ifndef USE_AESD_CHAR_DEVICE
-	if (fseek(log_fp, 0, SEEK_SET)) {
+//#ifndef USE_AESD_CHAR_DEVICE
+	if (lseek(log_fp, 0, SEEK_SET)) {
 		perror("fseek SET failed");
 		goto err;
 	}
-	fflush(log_fp);
-#endif
+//#endif
 
 	// Read from the file and write to the socket
-	while ((readfilelen = fread(buf, sizeof(char), BUFLEN, log_fp))) {
+	while ((readfilelen = read(log_fp, buf, BUFLEN))) {
 		sendsocklen = send(c->sock, buf, readfilelen, 0);
 
 		if (readfilelen != sendsocklen) {
@@ -201,6 +200,7 @@ static void sig_handler(int signal) {
 		break;
 	default:
 		// do nothing.
+		break;
 	}
 }
 
@@ -265,8 +265,7 @@ static void * timer_log(void *arg) {
 			// do something?
 		}
 
-		fflush(log_fp);
-		if (fseek(log_fp, 0, SEEK_END)) {
+		if (lseek(log_fp, 0, SEEK_END)) {
 			perror("fseek END failed");
 		}
 
@@ -276,8 +275,7 @@ static void * timer_log(void *arg) {
 
 		memset(msg, 0, 512);
 		sprintf(msg, "timestamp:%s", timestamp);
-		fwrite(msg, sizeof(char), strlen(msg), log_fp);
-		fflush(log_fp);
+		write(log_fp, msg, strlen(msg));
 
 		if (pthread_mutex_unlock(&mutex)) {
 			perror("pthread_mutex_unlock error");
