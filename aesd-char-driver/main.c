@@ -26,6 +26,17 @@ int aesd_minor =   0;
 MODULE_AUTHOR("138bit"); /** TODO: fill in your name **/
 MODULE_LICENSE("Dual BSD/GPL");
 
+#define PROG_NAME "aesd-char-driver"
+
+//#define DEBUG
+#ifdef DEBUG
+#define dbg(fmt, ...) \
+	printk(KERN_ERR "%s: %s: " fmt " \n", PROG_NAME, __func__, ##__VA_ARGS__)
+#else
+#define dbg(fmt, ...)
+#endif
+
+
 struct aesd_dev aesd_device;
 
 int aesd_open(struct inode *inode, struct file *filp) {
@@ -55,29 +66,39 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
 	 */
 	size_t e_pos = 0;
 	struct aesd_buffer_entry * entry;
-	printk(KERN_ERR "read %zu bytes with offset %lld",count,*f_pos);
+	dbg("read %zu bytes with offset %lld",count,*f_pos);
 
-	mutex_lock(&aesd_device.lock);
+	// mutex_lock_interruptible?
+	if (mutex_lock_interruptible(&aesd_device.lock)) {
+		retval = -ERESTART;
+		goto out;
+	}
 	entry = aesd_circular_buffer_find_entry_offset_for_fpos(&aesd_device.buffer, *f_pos, &e_pos);
 	if (entry == NULL) {
-		retval = -EIO;
+		//retval = -EIO;
+		retval = 0;
 		goto out;
 	}
 
-	{
+#if 0
+	{ // print out buffer.
 		uint8_t index;
 		struct aesd_buffer_entry *entry;
 		AESD_CIRCULAR_BUFFER_FOREACH(entry, &aesd_device.buffer, index) {
 			if (entry->buffptr) {
-				printk(KERN_ERR "%d = %s", index, entry->buffptr);
+				dbg("%d = %s", index, entry->buffptr);
 			}
 		}
 	}
+#endif
 
-	size = (e_pos > count) ? count : e_pos;
+	size = entry->size - e_pos;
+	size = (count > size) ? size : count;
 
-	printk(KERN_ERR "got '%s'\n", entry->buffptr);
-	if (copy_to_user(buf, entry->buffptr + *f_pos, size)) {
+	//size = (e_pos > count) ? count : e_pos;
+
+	dbg("got '%s' with size %zu (cnt: %zu, e_pos: %zu)\n", entry->buffptr, size, count, e_pos);
+	if (copy_to_user(buf, entry->buffptr + e_pos, size)) {
 		retval = -EFAULT;
 		goto out;
 	}
@@ -92,7 +113,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 				loff_t *f_pos) {
 	ssize_t retval = -ENOMEM;
 	size_t len = 0;
-	PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
+	dbg("write %zu bytes with offset %lld",count,*f_pos);
 	/**
 	 * TODO: handle write
 	 */
@@ -100,7 +121,10 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 	// If nothing is written, return directly
 	if (count == 0) return 0;
 
-	mutex_lock(&aesd_device.lock);
+	if (mutex_lock_interruptible(&aesd_device.lock)) {
+		retval = -ERESTART;
+		goto out;
+	}
 
 	// Either create or increase buffer.
 	if (aesd_device.work.buffptr == NULL) {
@@ -108,19 +132,26 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 		if (! aesd_device.work.buffptr) {
 			goto out;
 		}
-		memset(aesd_device.work.buffptr, 0, count);
+		memset(aesd_device.work.buffptr, '\0', count + 1);
 		len = 0;
-		aesd_device.work.size = count;
+		aesd_device.work.size = count + 1;
 	} else {
 		char *old = aesd_device.work.buffptr;
-		aesd_device.work.buffptr = kmalloc(sizeof(char) * (count + 1 + aesd_device.work.size), GFP_KERNEL);
+		size_t total = count + aesd_device.work.size;
+
+		aesd_device.work.buffptr = kmalloc(sizeof(char) * total, GFP_KERNEL);
 		if (! aesd_device.work.buffptr) {
 			kfree(old);
 			goto out;
 		}
-		memset(aesd_device.work.buffptr, 0, count);
-		len = aesd_device.work.size;
-		aesd_device.work.size += count;
+		memset(aesd_device.work.buffptr, '\0', total);
+
+		strncpy(aesd_device.work.buffptr, old, aesd_device.work.size);
+
+		// because we're messing around with a '\0' on the end of the string.
+		// strlen would give this number!
+		len = aesd_device.work.size - 1;
+		aesd_device.work.size = total;
 		kfree(old);
 	}
 
@@ -131,14 +162,22 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 		retval = -EFAULT;
 		goto out;
 	}
+	dbg("Got string '%s' (len:%zu, count:%zu, size:%zu)\n", buf, len, count, aesd_device.work.size);
 
-	if ((retval = aesd_circular_buffer_add_entry(&aesd_device.buffer,
-		(const struct aesd_buffer_entry *)&aesd_device.work))) {
-		goto out;
-	}
-		kfree(aesd_device.work.buffptr);
+	// Remove two because we add 1, and indexes start at 0.
+	if (aesd_device.work.buffptr[aesd_device.work.size - 2] == '\n') {
+		dbg("putting string '%s' into circular buffer\n", aesd_device.work.buffptr);
+		// remove null terminator:
+		aesd_device.work.size -= 1;
+		// This function re-uses the pointer, ..
+		aesd_circular_buffer_add_entry(&aesd_device.buffer, 
+			(const struct aesd_buffer_entry *)&aesd_device.work);
+		// .. therefore I don't have to free it.
 		aesd_device.work.buffptr = NULL;
 		aesd_device.work.size = 0;
+	} else {
+		dbg("string '%s' not ready yet..\n", aesd_device.work.buffptr);
+	}
 
 	retval = count;
 out:
