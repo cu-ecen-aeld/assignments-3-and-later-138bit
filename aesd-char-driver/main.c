@@ -184,12 +184,40 @@ out:
 	mutex_unlock(&aesd_device.lock);
 	return retval;
 }
+
+loff_t aesd_lseek(struct file *file, loff_t offset, int whence) {
+	uint8_t index;
+	struct aesd_circular_buffer buffer;
+	struct aesd_buffer_entry *entry;
+	loff_t ret = 0;
+
+	if (mutex_lock_interruptible(&aesd_device.lock)) {
+		ret = -ERESTART;
+		goto out;
+	}
+
+	// I presume I can do this because unused have size 0, and once the buffer is full
+	// an "old" entry gets overwritten.
+	AESD_CIRCULAR_BUFFER_FOREACH(entry, &aesd_device.buffer, index) {
+		ret += entry->size;
+	}
+
+	if ((ret = fixed_size_llseek(file, offset, whence, ret)) < 0) {
+		goto out;
+	}
+
+out:
+	mutex_unlock(&aesd_device.lock);
+	return ret;
+}
+
 struct file_operations aesd_fops = {
 	.owner = THIS_MODULE,
 	.read = aesd_read,
 	.write = aesd_write,
 	.open = aesd_open,
 	.release = aesd_release,
+	.llseek = aesd_lseek,
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev) {
