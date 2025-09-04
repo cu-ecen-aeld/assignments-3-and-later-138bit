@@ -9,14 +9,21 @@
  */
 
 #ifdef __KERNEL__
+#include <linux/module.h>
+#include <linux/init.h>
 #include <linux/string.h>
+#include <linux/slab.h>
 #else
 #include <string.h>
 #endif
 
 #include "aesd-circular-buffer.h"
 
+#ifndef __KERNEL__
 #include <stdio.h>
+#else
+#define printf(n, ...) printk(KERN_INFO n, ##__VA_ARGS__)
+#endif
 
 #define INCREASE_OFFS(n) n = ((n + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED)
 
@@ -71,28 +78,61 @@ struct aesd_buffer_entry *aesd_circular_buffer_find_entry_offset_for_fpos(struct
 * Any necessary locking must be handled by the caller
 * Any memory referenced in @param add_entry must be allocated by and/or must have a lifetime managed by the caller.
 */
-void aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
+int aesd_circular_buffer_add_entry(struct aesd_circular_buffer *buffer, const struct aesd_buffer_entry *add_entry)
 {
     /**
     * TODO: implement per description
     */
+	int ret = 0;
+	struct aesd_buffer_entry *entry = &buffer->entry[buffer->in_offs];
+
 	if (buffer->full) {
 		// If buffer is full, increase out_offs
 		//buffer->out_offs = (buffer->out_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
 		printf("increasing out_offs to %d\n", buffer->out_offs);
+#ifdef __KERNEL__
+		kfree(entry->buffptr);
+		entry->buffptr = NULL;
+#endif
 		INCREASE_OFFS(buffer->out_offs);
 	}
 
-	printf("Pos %d set to %s\n", buffer->in_offs, add_entry->buffptr);
+	printf("Pos %d set to '%s'\n", buffer->in_offs, add_entry->buffptr);
+
+#ifdef __KERNEL__
+	// Allocate new entry in the circular buffer
+	if (entry->buffptr == NULL) {
+		if (add_entry->size > entry->size) {
+			printk(KERN_ERR " Clean existing entry\n");
+			kfree(entry->buffptr);
+			entry->buffptr = NULL;
+			entry->size = 0;
+		} else {
+			printk(KERN_ERR " Creating new entry\n");
+		}
+
+		entry->buffptr = kmalloc(sizeof(char) * add_entry->size + 1, GFP_KERNEL);
+		if (! entry->buffptr) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		memset(entry->buffptr, 0, add_entry->size + 1);
+		entry->size = add_entry->size;
+	}
+#endif
 
 	// Add entry to the array and increase in_offs
-	memcpy(&buffer->entry[buffer->in_offs], add_entry, sizeof(struct aesd_buffer_entry));
-	//buffer->in_offs = (buffer->in_offs + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+	strncpy(entry->buffptr, add_entry->buffptr, add_entry->size);
+	entry->size = add_entry->size;
+	//memcpy(entry, add_entry, sizeof(struct aesd_buffer_entry));
 	INCREASE_OFFS(buffer->in_offs);
 
 	// Check if buffer is full on the last line to make sure the starting condition doesn't mark the
 	// buffer as full from the start.
 	buffer->full = buffer->in_offs == buffer->out_offs;
+
+out:
+	return ret;
 }
 
 /**
