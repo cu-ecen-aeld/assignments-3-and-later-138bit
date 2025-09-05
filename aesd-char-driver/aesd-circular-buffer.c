@@ -37,8 +37,6 @@
 
 #endif
 
-#define INCREASE_OFFS(n) n = ((n + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED)
-
 /**
  * @param buffer the buffer to search for corresponding offset.  Any necessary locking must be performed by caller.
  * @param char_offset the position to search for in the buffer list, describing the zero referenced

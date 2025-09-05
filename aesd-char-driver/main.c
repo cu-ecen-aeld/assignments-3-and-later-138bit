@@ -20,6 +20,8 @@
 #include <linux/slab.h>	// kmalloc
 #include "aesdchar.h"
 #include "aesd-circular-buffer.h"
+#include "aesd_ioctl.h"
+
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
@@ -70,7 +72,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
 
 	// mutex_lock_interruptible?
 	if (mutex_lock_interruptible(&aesd_device.lock)) {
-		retval = -ERESTART;
+		retval = -ERESTARTSYS;
 		goto out;
 	}
 	entry = aesd_circular_buffer_find_entry_offset_for_fpos(&aesd_device.buffer, *f_pos, &e_pos);
@@ -122,7 +124,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 	if (count == 0) return 0;
 
 	if (mutex_lock_interruptible(&aesd_device.lock)) {
-		retval = -ERESTART;
+		retval = -ERESTARTSYS;
 		goto out;
 	}
 
@@ -192,7 +194,7 @@ loff_t aesd_lseek(struct file *file, loff_t offset, int whence) {
 	loff_t ret = 0;
 
 	if (mutex_lock_interruptible(&aesd_device.lock)) {
-		ret = -ERESTART;
+		ret = -ERESTARTSYS;
 		goto out;
 	}
 
@@ -211,6 +213,93 @@ out:
 	return ret;
 }
 
+/**
+ * Adjust the file offset (f_pos) parameter of @param flip based on the location specified by
+ * @param write_cmd (the zero referenced command to locate)
+ * and @param write_cmd_offset (the zero referenced offset into the command)
+ * @return 0 if successful, negative if error occured:
+ *	- ERESTARTSYS if mutex could not be obtained
+ *	- -EINVAL if write command or write_cmd_offset was out of range
+ */
+
+#include <linux/math.h>
+static long aesd_adjust_file_offset(struct file *flip, unsigned int write_cmd, unsigned int write_cmd_offset) {
+	// write_cmd is the 0..(AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED-1)
+	// write_cmd_offset = char in (2 in "grass" is "a")
+	long ret = -EINVAL;
+	size_t tmp;
+	loff_t off = 0;
+	struct aesd_buffer_entry *entry;
+
+	if (mutex_lock_interruptible(&aesd_device.lock)) {
+		ret = -ERESTARTSYS;
+		goto out;
+	}
+
+	// Check if 'write_cmd' is in bound.
+	if (aesd_device.buffer.full) {
+		tmp = AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED;
+	} else {
+		tmp = (aesd_device.buffer.in_offs > aesd_device.buffer.out_offs) ?
+			aesd_device.buffer.in_offs - aesd_device.buffer.out_offs :
+			AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED - aesd_device.buffer.out_offs - aesd_device.buffer.in_offs ;
+		//// Ensures "current" is added to the count.
+		tmp += 1;
+	}
+	if (write_cmd >= tmp) goto out;
+
+	// Check if 'write_cmd_offset' is in bound.
+	entry = &aesd_device.buffer.entry[write_cmd];
+	if (write_cmd_offset > entry->size) goto out;
+
+	// values are OK.. Do something here..
+	// TODO: between out and in, add entry->size and set offset.
+	tmp = aesd_device.buffer.out_offs;
+	do {
+		entry = &aesd_device.buffer.entry[tmp];
+		off += entry->size;
+		INCREASE_OFFS(tmp);
+	} while (tmp != aesd_device.buffer.in_offs);
+	
+	ret = 0;
+out:
+	mutex_unlock(aesd_device.lock);
+	return ret;
+}
+
+long aesd_compact_ioctl(struct file * file, unsigned int command, unsigned long arg) {
+	long err = 0;
+	switch(command) {
+		case AESDCHAR_IOCSEEKTO: {
+			// passes buffer from user space containing two 4 byte values
+			/*
+				struct aesd_seekto {
+					// The zero referenced write command to seek into
+					uint32_t write_cmd;
+					// The zero referenced offset within the write
+					uint32_t write_cmd_offset;
+				};
+				sctruct aesd_seekto seekto;
+				seekto.write_cmd = write_cmd;
+				seekto.write_cmd_offset = offset;
+				int result_ret = ioctl(fd, AESDCHAR_IOCSEEKTO, &seekto)
+			*/
+			struct aesd_seekto seekto;
+			if (copy_from_user(&seekto, (void __user *)arg, sizeof(seekto))) {
+				err = -EFAULT;
+			}
+
+
+			ret = file->llseek(file, )
+			break;
+		}
+		default:
+			ret = -EINVAL;
+			break;
+	}
+	return err;
+}
+
 struct file_operations aesd_fops = {
 	.owner = THIS_MODULE,
 	.read = aesd_read,
@@ -218,6 +307,10 @@ struct file_operations aesd_fops = {
 	.open = aesd_open,
 	.release = aesd_release,
 	.llseek = aesd_lseek,
+	//.compact_ioctl = 
+
+	// unlockes assumes sizeof(unsigned long) == sizeof(void *)
+	.unlocked_ioctl = aesd_compact_ioctl
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev) {
