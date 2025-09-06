@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <unistd.h>
+#include <stdint.h>
 #include <errno.h>
 #include <string.h>
 #include <stdlib.h>	/* exit         */
@@ -10,6 +11,8 @@
 #include <pthread.h>
 #include <time.h>
 #include <fcntl.h>	/* open */
+
+#include "aesd_ioctl.h"
 
 #define PROG_NAME	"aesdsocket"
 
@@ -124,6 +127,9 @@ void client_setup(client_t *c) {
 }
 
 #define BUFLEN 1023
+
+#define CMD_IOCTL_AESDCHAR_IOCSEEKTO "AESDCHAR_IOCSEEKTO:"
+
 void client_logic(client_t *c) {
 	char buf[BUFLEN + 1];
 	ssize_t readsocklen = 0;
@@ -132,6 +138,7 @@ void client_logic(client_t *c) {
 
 //#ifndef USE_AESD_CHAR_DEVICE
 	// Always make sure we're writing to the end of the file
+
 	if (lseek(log_fp, 0, SEEK_END) < 0) {
 		perror("lseek END failed");
 		goto err;
@@ -156,9 +163,28 @@ void client_logic(client_t *c) {
 	while ((readsocklen = recv(c->sock, buf, BUFLEN, MSG_DONTWAIT)) > 1) {
 		buf[readsocklen] = '\0';
 		syslog(LOG_INFO, "%s", buf);
-		if (write(log_fp, buf, readsocklen) < 0) {
-			perror("fputs failed");
-			goto err;
+
+		if (strncmp(buf, CMD_IOCTL_AESDCHAR_IOCSEEKTO, strlen(CMD_IOCTL_AESDCHAR_IOCSEEKTO)) == 0) {
+			struct aesd_seekto seekto = {0, 0};
+			int cnt = sscanf(buf, CMD_IOCTL_AESDCHAR_IOCSEEKTO "%u,%u", &seekto.write_cmd, &seekto.write_cmd_offset);
+			if (cnt < 0) {
+				errno = EINVAL;
+				perror("sscanf returned error");
+				goto err;
+			} else if (cnt != 2) {
+				errno = EINVAL;
+				perror("sscanf didn't scan two entries");
+				goto err;
+			}
+			if (ioctl(log_fp, AESDCHAR_IOCSEEKTO, &seekto))  {
+				perror("ioctl");
+				goto err;
+			}
+		} else {
+			if (write(log_fp, buf, readsocklen) < 0) {
+				perror("fputs failed");
+				goto err;
+			}
 		}
 	}
 
