@@ -18,6 +18,7 @@
 
 // Global data
 static int log_fp = 0;
+struct aesd_seekto seekto = {0, 0};
 static pthread_mutex_t mutex;
 
 #ifndef USE_AESD_CHAR_DEVICE
@@ -165,7 +166,6 @@ void client_logic(client_t *c) {
 		syslog(LOG_INFO, "%s", buf);
 
 		if (strncmp(buf, CMD_IOCTL_AESDCHAR_IOCSEEKTO, strlen(CMD_IOCTL_AESDCHAR_IOCSEEKTO)) == 0) {
-			struct aesd_seekto seekto = {0, 0};
 			int cnt = sscanf(buf, CMD_IOCTL_AESDCHAR_IOCSEEKTO "%u,%u", &seekto.write_cmd, &seekto.write_cmd_offset);
 			if (cnt < 0) {
 				errno = EINVAL;
@@ -174,10 +174,6 @@ void client_logic(client_t *c) {
 			} else if (cnt != 2) {
 				errno = EINVAL;
 				perror("sscanf didn't scan two entries");
-				goto err;
-			}
-			if (ioctl(log_fp, AESDCHAR_IOCSEEKTO, &seekto))  {
-				perror("ioctl");
 				goto err;
 			}
 		} else {
@@ -189,11 +185,16 @@ void client_logic(client_t *c) {
 	}
 
 //#ifndef USE_AESD_CHAR_DEVICE
-	if (lseek(log_fp, 0, SEEK_SET)) {
-		perror("fseek SET failed");
+//	if (lseek(log_fp, 0, SEEK_SET)) {
+//		perror("fseek SET failed");
+//		goto err;
+//	}
+//#endif
+	// instead use ioctl to seek the position.
+	if (ioctl(log_fp, AESDCHAR_IOCSEEKTO, &seekto))  {
+		perror("ioctl");
 		goto err;
 	}
-//#endif
 
 	// Read from the file and write to the socket
 	while ((readfilelen = read(log_fp, buf, BUFLEN))) {
