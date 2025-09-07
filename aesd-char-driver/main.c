@@ -30,7 +30,7 @@ MODULE_LICENSE("Dual BSD/GPL");
 
 #define PROG_NAME "aesd-char-driver"
 
-//#define DEBUG
+#define DEBUG
 #ifdef DEBUG
 #define dbg(fmt, ...) \
 	printk(KERN_ERR "%s: %s: " fmt " \n", PROG_NAME, __func__, ##__VA_ARGS__)
@@ -99,7 +99,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
 
 	//size = (e_pos > count) ? count : e_pos;
 
-	dbg("got '%s' with size %zu (cnt: %zu, e_pos: %zu)\n", entry->buffptr, size, count, e_pos);
+	//dbg("got '%s' with size %zu (cnt: %zu, e_pos: %zu)\n", entry->buffptr, size, count, e_pos);
 	if (copy_to_user(buf, entry->buffptr + e_pos, size)) {
 		retval = -EFAULT;
 		goto out;
@@ -164,11 +164,11 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 		retval = -EFAULT;
 		goto out;
 	}
-	dbg("Got string '%s' (len:%zu, count:%zu, size:%zu)\n", buf, len, count, aesd_device.work.size);
+	//dbg("Got string '%s' (len:%zu, count:%zu, size:%zu)\n", buf, len, count, aesd_device.work.size);
 
 	// Remove two because we add 1, and indexes start at 0.
 	if (aesd_device.work.buffptr[aesd_device.work.size - 2] == '\n') {
-		dbg("putting string '%s' into circular buffer\n", aesd_device.work.buffptr);
+		//dbg("putting string '%s' into circular buffer\n", aesd_device.work.buffptr);
 		// remove null terminator:
 		aesd_device.work.size -= 1;
 		// This function re-uses the pointer, ..
@@ -178,10 +178,11 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 		aesd_device.work.buffptr = NULL;
 		aesd_device.work.size = 0;
 	} else {
-		dbg("string '%s' not ready yet..\n", aesd_device.work.buffptr);
+		//dbg("string '%s' not ready yet..\n", aesd_device.work.buffptr);
 	}
 
 	retval = count;
+	*f_pos += retval;
 out:
 	mutex_unlock(&aesd_device.lock);
 	return retval;
@@ -189,7 +190,6 @@ out:
 
 loff_t aesd_lseek(struct file *file, loff_t offset, int whence) {
 	uint8_t index;
-	struct aesd_circular_buffer buffer;
 	struct aesd_buffer_entry *entry;
 	loff_t ret = 0;
 
@@ -222,7 +222,6 @@ out:
  *	- -EINVAL if write command or write_cmd_offset was out of range
  */
 
-#include <linux/math.h>
 static long aesd_adjust_file_offset(struct file *flip, unsigned int write_cmd, unsigned int write_cmd_offset) {
 	// write_cmd is the 0..(AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED-1)
 	// write_cmd_offset = char in (2 in "grass" is "a")
@@ -232,6 +231,7 @@ static long aesd_adjust_file_offset(struct file *flip, unsigned int write_cmd, u
 	struct aesd_buffer_entry *entry;
 
 	if (mutex_lock_interruptible(&aesd_device.lock)) {
+		dbg("mutex_lock_interruptible ERROR");
 		ret = -ERESTARTSYS;
 		goto out;
 	}
@@ -246,29 +246,48 @@ static long aesd_adjust_file_offset(struct file *flip, unsigned int write_cmd, u
 		//// Ensures "current" is added to the count.
 		tmp += 1;
 	}
-	if (write_cmd >= tmp) goto out;
+	if (write_cmd >= tmp) {
+		dbg("write_cmd >= tmp!!");
+		goto out;
+	}
 
 	// Check if 'write_cmd_offset' is in bound.
 	entry = &aesd_device.buffer.entry[write_cmd];
-	if (write_cmd_offset > entry->size) goto out;
+	if (write_cmd_offset > entry->size) {
+		dbg("write_cmd_offset > entry->size");
+		goto out;
+	}
 
 	// values are OK.. Do something here..
-	// TODO: between out and in, add entry->size and set offset.
+	// between beginning of 'circ.arr' (out_offs) and tmp_cmd, calc size (E(strlen) + write_cmd_offset)
 	tmp = aesd_device.buffer.out_offs;
-	do {
+	while(tmp != write_cmd) {
 		entry = &aesd_device.buffer.entry[tmp];
+		dbg("entry %zu has size %zu", tmp, entry->size);
 		off += entry->size;
 		INCREASE_OFFS(tmp);
-	} while (tmp != aesd_device.buffer.in_offs);
-	
+	}
+
+	off += write_cmd_offset;
+	dbg("Setting f_pos from %lld to %lld", flip->f_pos, off);
+
+	flip->f_pos = off;
 	ret = 0;
+
+	// Set f_pos.
+	//if (off != flip->f_op->llseek(flip, off, SEEK_SET)) {
+	//	dbg("Offset does not align with given input");
+	//	ret = -EIO;
+	//	goto out;
+	//}
+	//return 0;
 out:
-	mutex_unlock(aesd_device.lock);
+	mutex_unlock(&aesd_device.lock);
 	return ret;
 }
 
 long aesd_compact_ioctl(struct file * file, unsigned int command, unsigned long arg) {
-	long err = 0;
+	long ret = 0;
 	switch(command) {
 		case AESDCHAR_IOCSEEKTO: {
 			// passes buffer from user space containing two 4 byte values
@@ -286,18 +305,26 @@ long aesd_compact_ioctl(struct file * file, unsigned int command, unsigned long 
 			*/
 			struct aesd_seekto seekto;
 			if (copy_from_user(&seekto, (void __user *)arg, sizeof(seekto))) {
-				err = -EFAULT;
+				ret = -EFAULT;
+				goto out;
 			}
 
+			if (aesd_adjust_file_offset(file, seekto.write_cmd, seekto.write_cmd_offset) < 0) {
+				dbg("aesd_adjust_file_offset FAILED  -- %u / %u", seekto.write_cmd, seekto.write_cmd_offset);
+				ret = -EINVAL;
+				goto out;
+			} else {
+				dbg("aesd_adjust_file_offset OK -- %u / %u", seekto.write_cmd, seekto.write_cmd_offset);
+			}
 
-			ret = file->llseek(file, )
 			break;
 		}
 		default:
 			ret = -EINVAL;
-			break;
+			goto out;
 	}
-	return err;
+out:
+	return ret;
 }
 
 struct file_operations aesd_fops = {
@@ -356,7 +383,6 @@ int aesd_init_module(void) {
 
 void aesd_cleanup_module(void) {
 	uint8_t index;
-	struct aesd_circular_buffer buffer;
 	struct aesd_buffer_entry *entry;
 
 	dev_t devno = MKDEV(aesd_major, aesd_minor);
